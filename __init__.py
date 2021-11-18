@@ -4,7 +4,7 @@ from interpret import interpret
 
 
 def bedlam(script, **scope):
-    return interpret(parse(script), **scope)
+    return interpret(parse(script), scope)
 
 
 if __name__ == '__main__':

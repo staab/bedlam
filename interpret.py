@@ -1,9 +1,11 @@
 import json, sys, functools
+from parse import parse
 
 
-def interpret(ast, **kw):
-    scope = _builtins.copy()
-    scope.update(kw)
+def interpret(ast, scope=None):
+    scope = {} if scope is None else scope
+    scope.update(_builtins)
+    scope.update(_library)
 
     try:
         for node in ast:
@@ -15,6 +17,7 @@ def interpret(ast, **kw):
 
 
 # Utils
+
 
 def _get_root_context(context):
     while 'parent' in context:
@@ -253,20 +256,6 @@ def fn_join(args, node, context):
     ])
 
 
-@define_key('inc', _builtins)
-def fn_inc(args, node, context):
-    [n] = assert_arity(node, args, exact=1)
-
-    return evaluate(n, context) + 1
-
-
-@define_key('dec', _builtins)
-def fn_dec(args, node, context):
-    [n] = assert_arity(node, args, exact=1)
-
-    return evaluate(n, context) - 1
-
-
 @define_key('+', _builtins)
 def fn_minus(args, node, context):
     return sum([evaluate(arg, context) for arg in args])
@@ -296,6 +285,18 @@ def fn_divide(args, node, context):
         raise InterpeterError("Division by zero")
 
     return a / b
+
+
+# Library
+
+
+_library = {}
+
+with open('library.bedlam', 'r') as f:
+    interpret(parse(f.read()), _library)
+
+
+# Main
 
 
 if __name__ == '__main__':
