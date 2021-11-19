@@ -8,12 +8,11 @@ def interpret(ast, scope=None):
     scope.update(_library)
 
     try:
-        for node in ast:
-            result = evaluate(node, {'scope': scope})
+        result = evaluate_all(ast, {'scope': scope})
     except InterpreterReturn as exc:
         return exc.args[0]
 
-    return result
+    return result[-1]
 
 
 # Utils
@@ -35,13 +34,13 @@ def assert_arity(node, args, exact=None, min=None, max=None):
     if min is not None and n < min:
         raise InterpeterError("Incorrect number of arguments passed", node)
 
-    if max is not None and n < max:
+    if max is not None and n > max:
         raise InterpeterError("Incorrect number of arguments passed", node)
 
     return args
 
 
-def derive_node(node, type, value):
+def wrap(node, type, value):
     new_node = node.copy()
     new_node.update({'type': type, 'value': value})
 
@@ -76,6 +75,14 @@ def evaluate(node, context):
     return handler(node, context)
 
 
+def evaluate_all(nodes, context):
+    result = []
+    for node in nodes:
+        result.append(evaluate(node, context))
+
+    return result
+
+
 _handlers = {}
 
 
@@ -104,6 +111,11 @@ def handle_identifier(node, context):
     raise InterpeterError(f"Unable to resolve name {value}", node)
 
 
+@define_key('any', _handlers)
+def handle_any(node, context):
+    return node['value']
+
+
 @define_key('int', _handlers)
 def handle_int(node, context):
     return node['value']
@@ -121,7 +133,7 @@ def handle_string(node, context):
 
 @define_key('vec', _handlers)
 def handle_vec(node, context):
-    return [evaluate(x, context) for x in node['value']]
+    return evaluate_all(node['value'], context)
 
 
 @define_key('map', _handlers)
@@ -137,27 +149,15 @@ def handle_map(node, context):
 # Builtins
 
 
-_builtins = {}
+_builtins = {'true': True, 'false': False, 'nil': None}
 
 
 @define_key('defn', _builtins)
 def fn_defn(args, node, context):
-    name, params, body = assert_arity(node, args, min=3)
+    name, *args = assert_arity(node, args, min=3)
+    args = [wrap(node, 'identifier', 'fn')] + args
 
-    for param in params['value']:
-        if param['type'] != 'identifier':
-            raise InterpeterError(f"Invalid function parameter {param['value']}", param)
-
-    def f(caller_args, caller_node, caller_context):
-        return evaluate(body, {
-            'parent': context,
-            'scope': {
-                param['value']: evaluate(caller_args[i], caller_context)
-                for i, param in enumerate(params['value'])
-            },
-        })
-
-    context['scope'][name['value']] = f
+    context['scope'][name['value']] = evaluate(wrap(node, 'call', args), context)
 
 
 @define_key('fn', _builtins)
@@ -169,13 +169,20 @@ def fn_fn(args, node, context):
             raise InterpeterError(f"Invalid function parameter {param['value']}", param)
 
     def f(caller_args, caller_node, caller_context):
-        return evaluate(body, {
-            'parent': context,
-            'scope': {
-                param['value']: evaluate(caller_args[i], caller_context)
-                for i, param in enumerate(params['value'])
-            },
-        })
+        new_scope = {}
+        for i, param in enumerate(params['value']):
+            if param['value'] == '&':
+                rest = evaluate_all(caller_args[i:], caller_context)
+                new_scope[params['value'][i + 1]['value']] = rest
+
+                break
+
+            new_scope[param['value']] = evaluate(caller_args[i], caller_context)
+
+        if len(params['value']) > i + 2:
+            raise InterpeterError(f"Only one rest argument should be defined", node)
+
+        return evaluate(body, {'parent': context, 'scope': new_scope})
 
     return f
 
@@ -185,7 +192,7 @@ def fn_partial(args, node, context):
     name, *args = assert_arity(node, args, min=2)
 
     def f(caller_args, caller_node, caller_context):
-        return evaluate(derive_node(node, 'call', [name] + args + caller_args), context)
+        return evaluate(wrap(node, 'call', [name] + args + caller_args), context)
 
     return f
 
@@ -193,18 +200,42 @@ def fn_partial(args, node, context):
 @define_key('apply', _builtins)
 def fn_apply(args, node, context):
     f, args = assert_arity(node, args, exact=2)
+    args = [wrap(node, 'any', x) for x in evaluate(args, context)]
 
-    return evaluate(derive_node(node, 'call', [f] + args['value']), context)
+    return evaluate(wrap(node, 'call', [f] + args), context)
 
 
 @define_key('map', _builtins)
 def fn_map(args, node, context):
-    f, args = assert_arity(node, args, exact=2)
+    f, xs = assert_arity(node, args, exact=2)
+    xs = evaluate(xs, context)
 
     return [
-        evaluate(derive_node(node, 'call', [f, arg]), context)
-        for arg in args['value']
+        evaluate(wrap(node, 'call', [f, wrap(node, 'any', x)]), context)
+        for x in xs
     ]
+
+
+@define_key('filter', _builtins)
+def fn_filter(args, node, context):
+    f, xs = assert_arity(node, args, exact=2)
+    xs = evaluate(xs, context)
+
+    return [
+        x for x in xs
+        if evaluate(wrap(node, 'call', [f, wrap(node, 'any', x)]), context)
+    ]
+
+
+@define_key('reduce', _builtins)
+def fn_reduce(args, node, context):
+    f, init, xs = assert_arity(node, args, exact=3)
+
+    r = evaluate(init, context)
+    for x in xs['value']:
+        r = evaluate(wrap(node, 'call', [f, x, wrap(node, init['type'], r)]), context)
+
+    return r
 
 
 @define_key('let', _builtins)
@@ -219,6 +250,24 @@ def fn_let(args, node, context):
             for i in range(0, len(pairs), 2)
         },
     })
+
+
+@define_key('if', _builtins)
+def fn_if(args, node, context):
+    condition, yes, no = assert_arity(node, args, exact=3)
+
+    if evaluate(condition, context):
+        return evaluate(yes, context)
+
+    return evaluate(no, context)
+
+
+@define_key('when', _builtins)
+def fn_when(args, node, context):
+    condition, yes = assert_arity(node, args, exact=2)
+
+    if evaluate(condition, context):
+        return evaluate(yes, context)
 
 
 @define_key('case', _builtins)
@@ -256,16 +305,23 @@ def fn_join(args, node, context):
     ])
 
 
+@define_key('not', _builtins)
+def fn_not(args, node, context):
+    [x] = assert_arity(node, args, exact=1)
+
+    return not evaluate(x, context)
+
+
 @define_key('+', _builtins)
-def fn_minus(args, node, context):
-    return sum([evaluate(arg, context) for arg in args])
+def fn_plus(args, node, context):
+    return sum(evaluate_all(args, context))
 
 
 @define_key('-', _builtins)
 def fn_minus(args, node, context):
-    a, b = assert_arity(node, args, exact=2)
+    a, b = evaluate_all(assert_arity(node, args, exact=2), context)
 
-    return evaluate(a, context) - evaluate(b, context)
+    return a - b
 
 
 @define_key('*', _builtins)
@@ -277,14 +333,63 @@ def fn_multiply(args, node, context):
 
 @define_key('/', _builtins)
 def fn_divide(args, node, context):
-    a, b = assert_arity(node, args, exact=2)
-    a = evaluate(a, context)
-    b = evaluate(b, context)
+    a, b = evaluate_all(assert_arity(node, args, exact=2), context)
 
     if b == 0:
-        raise InterpeterError("Division by zero")
+        raise InterpeterError("Division by zero", node)
 
     return a / b
+
+
+@define_key('>', _builtins)
+def fn_gt(args, node, context):
+    a, b = evaluate_all(assert_arity(node, args, exact=2), context)
+
+    return a > b
+
+
+@define_key('<', _builtins)
+def fn_gt(args, node, context):
+    a, b = evaluate_all(assert_arity(node, args, exact=2), context)
+
+    return a < b
+
+
+@define_key('=', _builtins)
+def fn_gt(args, node, context):
+    a, b = evaluate_all(assert_arity(node, args, exact=2), context)
+
+    return a == b
+
+
+@define_key('or', _builtins)
+def fn_gt(args, node, context):
+    return any(evaluate_all(args, context))
+
+
+@define_key('and', _builtins)
+def fn_gt(args, node, context):
+    return all(evaluate_all(args, context))
+
+
+@define_key('nth', _builtins)
+def fn_nth(args, node, context):
+    xs, i = evaluate_all(assert_arity(node, args, exact=2), context)
+
+    if type(xs) != list:
+        raise InterpeterError("Can't get index of non-vector", node)
+
+    return xs[i]
+
+
+@define_key('slice', _builtins)
+def fn_slice(args, node, context):
+    xs, *slice_args = evaluate_all(assert_arity(node, args, min=2, max=4), context)
+
+    if type(xs) != list:
+        raise InterpeterError("Can't get slice of non-vector", node)
+
+    return xs[slice(*slice_args)]
 
 
 # Library

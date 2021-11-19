@@ -1,2 +1,10 @@
 (defn inc [x] (+ x 1))
 (defn dec [x] (- x 1))
+(defn last [xs] (nth xs -1))
+(defn first [xs] (nth xs 0))
+(defn ffirst [xs] (nth (nth xs 0) 0))
+(defn >= [a b] (or (> a b) (= a b)))
+(defn <= [a b] (or (< a b) (= a b)))
+(defn comp [f] (fn [& args] (not (apply f args))))
+(defn reject [f xs] (filter (comp f) xs))
+
