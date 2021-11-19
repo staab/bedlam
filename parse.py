@@ -41,7 +41,15 @@ NEWLINE = placeholder('NEWLINE')
 # Build AST
 
 
-def build_ast(tokens, location):
+class ParserError(Exception):
+    def __init__(self, message, location):
+        line = location['line']
+        column = location['column']
+
+        super(Exception, self).__init__(f"{message} (at line {line} column {column})")
+
+
+def build_ast(tokens, location, depth=0):
     ast = []
 
     def add_node(type, value, token):
@@ -56,6 +64,9 @@ def build_ast(tokens, location):
         token, *tokens = tokens
 
         if token in {')', ']', '}'}:
+            if depth == 0:
+                raise ParserError(f"Syntax error: unexpected '{token}'", location)
+
             return ast, tokens
 
         if token == NEWLINE:
@@ -79,7 +90,7 @@ def build_ast(tokens, location):
             if token == '{':
                 type = 'map'
 
-            children, tokens = build_ast(tokens, location)
+            children, tokens = build_ast(tokens, location, depth + 1)
 
             add_node(type, children, token)
 
